@@ -1,6 +1,10 @@
+use std::array::TryFromSliceError;
 use std::collections::HashMap;
+use std::error::Error;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::LowLevelError;
 
 /// Header exists in any block thus it should be as small as possible.
 pub const BLOCK_HEADER_SPACE_BYTES: usize = 32;
@@ -56,7 +60,7 @@ pub(crate) struct FlatMeta {
     meta: Vec<MetaEntry>,
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Debug)]
 pub(crate) struct MetaEntry {
     k: String,
     v: Vec<u8>,
@@ -64,9 +68,8 @@ pub(crate) struct MetaEntry {
 
 /// Serialize header to bytes array of the fixed size.
 /// The size of [u8] must be bigger that required to store header.
-pub fn header_to_bytes(h: &FlatHeader) -> [u8; BLOCK_HEADER_SPACE_BYTES] {
+pub(crate) fn header_to_bytes(h: &FlatHeader) -> [u8; BLOCK_HEADER_SPACE_BYTES] {
     let mut buf = [0; BLOCK_HEADER_SPACE_BYTES];
-    let size = core::mem::size_of::<FlatHeader>();
     let ser: [u8; BLOCK_HEADER_SIZE] = unsafe {
         core::mem::transmute_copy(h)
     };
@@ -79,14 +82,44 @@ pub fn header_to_bytes(h: &FlatHeader) -> [u8; BLOCK_HEADER_SPACE_BYTES] {
 }
 
 /// Read header from bytes.
-/// Assuming that [u8] size is bigger that space occupied by header.
-pub fn header_from_bytes(buf: &[u8; BLOCK_HEADER_SPACE_BYTES]) -> FlatHeader {
-    let buff = &buf[0..BLOCK_HEADER_SIZE];
+/// Assuming that input buffer size is bigger that space occupied by header.
+pub(crate) fn header_from_bytes(buffer: &[u8; BLOCK_HEADER_SPACE_BYTES]) -> FlatHeader {
+    let mut sliced_buff: [u8; BLOCK_HEADER_SIZE] = [0; BLOCK_HEADER_SIZE];
+    for i in 0..BLOCK_HEADER_SIZE {
+        sliced_buff[i] = buffer[i];
+    }
     unsafe {
-        core::mem::transmute_copy(&buff)
+        core::mem::transmute(sliced_buff)
     }
 }
 
+
+pub(crate) fn serialize_meta(entires: &[MetaEntry]) -> Vec<u8> {
+    let mut res = Vec::new();
+    for e in entires {
+        let mut evec = serialize_entry(e);
+        res.append(&mut evec);
+    }
+    res
+}
+
+pub(crate) fn deserialize_meta(buf: &[u8]) -> Result<Vec<MetaEntry>, Box<dyn Error>> {
+    let mut entries = Vec::new();
+    let mut offset = 0;
+    loop {
+        let (entry, bytes_read) = deserialize_entry(&buf[offset..])?;
+        if bytes_read == 0 {
+            break;
+        }
+        entries.push(entry);
+
+        offset += bytes_read;
+        if offset >= buf.len() {
+            break;
+        }
+    }
+    Ok(entries)
+}
 
 pub(crate) fn serialize_entry(e: &MetaEntry) -> Vec<u8> {
     let kb = e.k.clone().into_bytes();
@@ -104,39 +137,46 @@ pub(crate) fn serialize_entry(e: &MetaEntry) -> Vec<u8> {
 }
 
 /// Returns deserialized entry and number of bytes that was read
-pub(crate) fn deserialize_entry(buf: &[u8]) -> (MetaEntry, usize) {
+pub(crate) fn deserialize_entry(buf: &[u8]) -> Result<(MetaEntry, usize), Box<dyn Error>> {
     let mut bytes_read = 8usize;
     let kbs = &buf[0..4];
     let vbs = &buf[4..8];
 
-    let kbl = u32::from_le_bytes(kbs.try_into().unwrap()) as usize;
-    let vbl = u32::from_le_bytes(vbs.try_into().unwrap()) as usize;
+    let kbl = u32::from_le_bytes(kbs.try_into()?) as usize;
+    let vbl = u32::from_le_bytes(vbs.try_into()?) as usize;
 
     bytes_read += kbl + vbl;
 
+    if kbl == 0 || vbl == 0 {
+        return Err(Box::new(LowLevelError {
+            cause: "Key and value can not be null".to_string()
+        }));
+    }
     if bytes_read > buf.len() {
-        panic!("Expecting to read more bytes than available in the input buffer");
+        return Err(Box::new(LowLevelError {
+            cause: "Expecting to read more bytes than available in the input buffer".to_string()
+        }));
     }
 
     let kb: &[u8] = &buf[8..(kbl + 8)];
     let vb: &[u8] = &buf[(8 + kbl)..(8 + kbl + vbl)];
 
-    let key = String::from_utf8_lossy(kb);
+    let key = String::from_utf8(Vec::from(kb))?;
     let value = Vec::from(vb);
 
-    (
+    Ok((
         MetaEntry {
             k: key.to_string(),
             v: value,
         },
         bytes_read
-    )
+    ))
 }
 
 
 #[cfg(test)]
 mod tests {
-    use crate::header::{BLOCK_HEADER_SIZE, BLOCK_HEADER_SPACE_BYTES, BlockVariant, deserialize_entry, FlatHeader, header_from_bytes, header_to_bytes, MetaEntry, serialize_entry};
+    use crate::header::{BLOCK_HEADER_SIZE, BLOCK_HEADER_SPACE_BYTES, BlockVariant, deserialize_entry, deserialize_meta, FlatHeader, header_from_bytes, header_to_bytes, MetaEntry, serialize_entry, serialize_meta};
 
     #[test]
     fn header_size() {
@@ -154,6 +194,7 @@ mod tests {
         let fh1_deser = header_from_bytes(&fh1_bts);
         let fh2_deser = header_from_bytes(&fh2_bts);
 
+        assert_eq!(fh1_bts, header_to_bytes(&fh1_deser));
         assert_eq!(fh1, fh1_deser);
         assert_eq!(fh2, fh2_deser);
 
@@ -173,7 +214,7 @@ mod tests {
 
         let m1_vec = serialize_entry(&m1);
 
-        let (m1_deser, m1_bytes) = deserialize_entry(&m1_vec);
+        let (m1_deser, m1_bytes) = deserialize_entry(&m1_vec).unwrap();
 
         assert_eq!(m1_bytes, m1_vec.len());
         assert_eq!(m1, m1_deser);
@@ -183,11 +224,36 @@ mod tests {
         assert_eq!(m1_vec, m1_vec2);
 
         let mut m1_vec_long = m1_vec.clone();
-        m1_vec_long.extend_from_slice(&[0,2,3,3,4,5]);
-        let (m1_long_deser, m1_long_bytes) = deserialize_entry(&m1_vec_long);
+        m1_vec_long.extend_from_slice(&[0, 2, 3, 3, 4, 5]);
+        let (m1_long_deser, m1_long_bytes) = deserialize_entry(&m1_vec_long).unwrap();
 
         assert!(m1_vec.len() < m1_vec_long.len());
         assert_eq!(m1_long_bytes, m1_vec.len());
         assert_eq!(m1_long_deser, m1_deser);
+    }
+
+    #[test]
+    fn meta_ser_deser() {
+        let m1 = MetaEntry {
+            k: "mime".to_string(),
+            v: vec![1u8, 2u8, 3u8, 4u8, 5u8],
+        };
+        let m2 = MetaEntry {
+            k: "dominant".to_string(),
+            v: vec![11u8, 12u8, 13u8, 14u8, 15u8, 16u8, 17u8],
+        };
+        let m3 = MetaEntry {
+            k: "submissive".to_string(),
+            v: vec![21u8, 22u8, 23u8, 24u8, 25u8],
+        };
+
+        let meta = vec![m1.clone(), m2.clone(), m3.clone()];
+
+        let meta_ser = serialize_meta(&meta);
+
+        let meta_deser = deserialize_meta(&meta_ser).unwrap();
+
+        assert_eq!(meta, meta_deser);
+        println!("{:?}", meta_ser);
     }
 }
