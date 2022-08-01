@@ -7,5 +7,3 @@ edition = "2021"
 
 [dependencies]
 flat-storage-backend = { path = "../backend"}
-
-serde = { version = "1.0", default-features = false, features = ["alloc","derive"] }
