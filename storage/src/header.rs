@@ -2,7 +2,7 @@ use std::array::TryFromSliceError;
 use std::collections::HashMap;
 use std::error::Error;
 
-use crate::FlatStorageError;
+use linear_storage_core::StorageError;
 
 /// Fixed space allocated for header in each block.
 pub const BLOCK_HEADER_SPACE_BYTES: usize = 20;

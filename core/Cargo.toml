@@ -1,5 +1,5 @@
 [package]
-name = "flat-storage-backend"
+name = "linear-storage-core"
 version = "0.1.0"
 edition = "2021"
 

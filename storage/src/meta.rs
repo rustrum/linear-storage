@@ -1,11 +1,11 @@
-use crate::FlatStorageError;
+use linear_storage_core::StorageError;
 
 #[derive(PartialEq, Debug)]
-pub(crate) struct FlatMeta {
+pub(crate) struct PayloadMeta {
     /// This is the primary key of your object.
-    payload_key: String,
+    key: String,
 
-    /// Some info about payload that could be cached in the memory for fast access.
+    /// Any relatively short info about payload.
     meta: Vec<MetaEntry>,
 }
 
@@ -20,17 +20,17 @@ pub(crate) struct MetaEntry {
 pub(crate) fn serialize_meta(entires: &[MetaEntry]) -> Vec<u8> {
     let mut res = Vec::new();
     for e in entires {
-        let mut evec = serialize_entry(e);
+        let mut evec = serialize_meta_entry(e);
         res.append(&mut evec);
     }
     res
 }
 
-pub(crate) fn deserialize_meta(buf: &[u8]) -> Result<Vec<MetaEntry>, FlatStorageError> {
+pub(crate) fn deserialize_meta(buf: &[u8]) -> Result<Vec<MetaEntry>, StorageError> {
     let mut entries = Vec::new();
     let mut offset = 0;
     loop {
-        let (entry, bytes_read) = deserialize_entry(&buf[offset..])?;
+        let (entry, bytes_read) = deserialize_meta_entry(&buf[offset..])?;
         if bytes_read == 0 {
             break;
         }
@@ -44,7 +44,7 @@ pub(crate) fn deserialize_meta(buf: &[u8]) -> Result<Vec<MetaEntry>, FlatStorage
     Ok(entries)
 }
 
-pub(crate) fn serialize_entry(e: &MetaEntry) -> Vec<u8> {
+pub(crate) fn serialize_meta_entry(e: &MetaEntry) -> Vec<u8> {
     let kb = e.k.clone();
     let vb = e.v.to_vec();
 
@@ -59,7 +59,7 @@ pub(crate) fn serialize_entry(e: &MetaEntry) -> Vec<u8> {
 }
 
 /// Returns deserialized entry and number of bytes that was read
-pub(crate) fn deserialize_entry(buf: &[u8]) -> Result<(MetaEntry, usize), FlatStorageError> {
+pub(crate) fn deserialize_meta_entry(buf: &[u8]) -> Result<(MetaEntry, usize), StorageError> {
     const init_offset: usize = 5;
     let key = buf[0];
     let value_size_bytes = &buf[1..5];
@@ -67,18 +67,18 @@ pub(crate) fn deserialize_entry(buf: &[u8]) -> Result<(MetaEntry, usize), FlatSt
     let value_size = u32::from_le_bytes(
         value_size_bytes
             .try_into()
-            .map_err(|e| FlatStorageError::Other(Box::new(e)))?,
+            .map_err(|e| StorageError::Other(Box::new(e)))?,
     ) as usize;
 
     let end_offset = init_offset + value_size;
 
     if key == 0u8 || value_size == 0 {
-        return Err(FlatStorageError::LowLevel(
+        return Err(StorageError::LowLevel(
             "Key or value can not be empty".to_string(),
         ));
     }
     if end_offset > buf.len() {
-        return Err(FlatStorageError::LowLevel(
+        return Err(StorageError::LowLevel(
             "Expecting to read more bytes than available in the input buffer".to_string(),
         ));
     }
@@ -97,7 +97,9 @@ pub(crate) fn deserialize_entry(buf: &[u8]) -> Result<(MetaEntry, usize), FlatSt
 
 #[cfg(test)]
 mod tests {
-    use super::{deserialize_entry, deserialize_meta, serialize_entry, serialize_meta, MetaEntry};
+    use super::{
+        deserialize_meta, deserialize_meta_entry, serialize_meta, serialize_meta_entry, MetaEntry,
+    };
 
     #[test]
     fn meta_entry_ser_deser() {
@@ -106,20 +108,20 @@ mod tests {
             v: vec![1u8, 2u8, 3u8, 4u8, 5u8],
         };
 
-        let m1_vec = serialize_entry(&m1);
+        let m1_vec = serialize_meta_entry(&m1);
 
-        let (m1_deser, m1_bytes) = deserialize_entry(&m1_vec).unwrap();
+        let (m1_deser, m1_bytes) = deserialize_meta_entry(&m1_vec).unwrap();
 
         assert_eq!(m1_bytes, m1_vec.len());
         assert_eq!(m1, m1_deser);
 
-        let mut m1_vec2 = serialize_entry(&m1_deser);
+        let mut m1_vec2 = serialize_meta_entry(&m1_deser);
 
         assert_eq!(m1_vec, m1_vec2);
 
         let mut m1_vec_long = m1_vec.clone();
         m1_vec_long.extend_from_slice(&[0, 2, 3, 3, 4, 5]);
-        let (m1_long_deser, m1_long_bytes) = deserialize_entry(&m1_vec_long).unwrap();
+        let (m1_long_deser, m1_long_bytes) = deserialize_meta_entry(&m1_vec_long).unwrap();
 
         assert!(m1_vec.len() < m1_vec_long.len());
         assert_eq!(m1_long_bytes, m1_vec.len());
