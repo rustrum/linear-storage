@@ -1,4 +1,9 @@
-use std::array::TryFromSliceError;
+//! Header takes a fixed set of bytes in any block.
+//! Header size is very small but still it occupy some space and if your block size is small
+//! this could affect your storage capacity.
+//! With 20 bytes headers and 256 bytes blocks only 92.2% will be available for storing data.
+//! With 128 bytes blocks -> 84.4%.
+//!
 use std::collections::HashMap;
 use std::error::Error;
 
@@ -7,58 +12,63 @@ use linear_storage_core::StorageError;
 /// Fixed space allocated for header in each block.
 pub const BLOCK_HEADER_SPACE_BYTES: usize = 20;
 
-const BLOCK_HEADER_SIZE: usize = core::mem::size_of::<FlatHeader>();
+const BLOCK_HEADER_SIZE: usize = core::mem::size_of::<BlockHeader>();
 
 const HEADER_V1: u8 = 0x10;
 
 /// Combination of type and version of the header 4x4 bits.
 /// Having more than 16 variants of headers is too much as well as supporting 16 different binary versions.
 #[repr(u8)]
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum HeaderTypever {
+    /// This is not a header.
+    /// All data must be considered as invalid.
+    EMPTY = 0x0,
     /// Undefined first block.
     /// It should mean that payload write is in progress right now.
     /// Also it could be some kind of improperly saved block, damaged, empty.
-    HEAD_UNDEF = HEADER_V1 | 0x00,
+    UNDEFINED = HEADER_V1 | 0x00,
+    /// Single block  that holds all payload.
+    SINGLE = HEADER_V1 | 0x01,
     /// First block, could be the last one too.
-    HEAD = HEADER_V1 | 0x01,
+    HEAD = HEADER_V1 | 0x02,
     /// One of the many possible middle blocks
-    MID = HEADER_V1 | 0x02,
+    MID = HEADER_V1 | 0x03,
     /// Tail block, the last one.
-    TAIL = HEADER_V1 | 0x03,
+    TAIL = HEADER_V1 | 0x04,
 }
 
 #[repr(C)]
 #[derive(PartialEq, Debug)]
-pub struct FlatHeader {
+pub struct BlockHeader {
     /// Combined header type and version field.
     /// For internal use only.
-    header_typever: HeaderTypever,
+    pub(crate) header_typever: HeaderTypever,
 
     /// Counter that is incremented each time payload updates.
     /// After `u16::MAX` resets to zero.
     /// Could be used to implement some kind of optimistic locking.
     /// It is also barely possible that you will have something like `u16::MAX` concurrent events at the same time.
-    payload_version: u16,
+    pub(crate) payload_version: u16,
 
     /// Size of the payload in bytes for `HEAD` block or number of the first block.
     /// Notice that we could potentially have multiple tails for the one root.
     /// Reference to root is just an additional information.
-    payload_size_or_root_block: u32,
+    pub(crate) payload_size_or_root_block: u32,
 
     /// Next block if it is exists or zero.
     /// The only one true valid reference that you should rely while reading payload.
-    next_block: u32,
+    pub(crate) next_block: u32,
 
     /// For `HEAD` block hold size of the meta bytes, for others - previous block number.
     /// Prev block could also lead to the same issues as reference to the root block.
     /// This is just an additional information.
-    meta_size_or_prev_block: u32,
+    pub(crate) meta_size_or_prev_block: u32,
 }
 
-impl Default for FlatHeader {
+impl Default for BlockHeader {
     fn default() -> Self {
-        FlatHeader {
+        BlockHeader {
             header_typever: HeaderTypever::HEAD,
             payload_version: 0,
             payload_size_or_root_block: 0,
@@ -70,7 +80,7 @@ impl Default for FlatHeader {
 
 /// Serialize header to bytes array of the fixed size.
 /// The size of [u8] must be bigger that required to store header.
-pub(crate) fn header_to_bytes(h: &FlatHeader) -> [u8; BLOCK_HEADER_SPACE_BYTES] {
+pub(crate) fn header_to_bytes(h: &BlockHeader) -> [u8; BLOCK_HEADER_SPACE_BYTES] {
     let mut buf = [0; BLOCK_HEADER_SPACE_BYTES];
     let ser: [u8; BLOCK_HEADER_SIZE] = unsafe { core::mem::transmute_copy(h) };
 
@@ -83,7 +93,7 @@ pub(crate) fn header_to_bytes(h: &FlatHeader) -> [u8; BLOCK_HEADER_SPACE_BYTES] 
 
 /// Read header from bytes.
 /// Assuming that input buffer size is bigger that space occupied by header.
-pub(crate) fn header_from_bytes(buffer: &[u8; BLOCK_HEADER_SPACE_BYTES]) -> FlatHeader {
+pub(crate) fn header_from_bytes(buffer: &[u8; BLOCK_HEADER_SPACE_BYTES]) -> BlockHeader {
     let mut sliced_buff: [u8; BLOCK_HEADER_SIZE] = [0; BLOCK_HEADER_SIZE];
     for i in 0..BLOCK_HEADER_SIZE {
         sliced_buff[i] = buffer[i];
@@ -93,10 +103,7 @@ pub(crate) fn header_from_bytes(buffer: &[u8; BLOCK_HEADER_SPACE_BYTES]) -> Flat
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        header_from_bytes, header_to_bytes, FlatHeader, HeaderTypever, BLOCK_HEADER_SIZE,
-        BLOCK_HEADER_SPACE_BYTES,
-    };
+    use super::*;
 
     #[test]
     fn header_size() {
@@ -105,12 +112,12 @@ mod tests {
 
     #[test]
     fn header_read_write() {
-        let fh1 = FlatHeader::default();
-        let fh2 = FlatHeader {
+        let fh1 = BlockHeader::default();
+        let fh2 = BlockHeader {
             header_typever: HeaderTypever::TAIL,
             payload_size_or_root_block: 10,
             meta_size_or_prev_block: 10,
-            ..FlatHeader::default()
+            ..BlockHeader::default()
         };
 
         let fh1_bts = header_to_bytes(&fh1);
