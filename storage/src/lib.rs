@@ -9,6 +9,8 @@ use linear_storage_core::{StorageBackend, StorageError};
 
 pub mod header;
 pub mod meta;
+#[cfg(test)]
+pub mod test;
 
 pub struct PayloadInfo {
     version: u16,
@@ -100,10 +102,10 @@ impl LinearStorage {
     #[inline]
     fn read_bytes_from_blocks_offsets(h: BlockHeader, c: ReadContent) -> (u32, u32) {
         match c {
-            All => (0, h.meta_size_or_prev_block + h.payload_size_or_root_block),
+            All => (0, h.meta_size_or_prev_block + h.content_size_or_root_block),
             Payload => (
                 h.meta_size_or_prev_block,
-                h.meta_size_or_prev_block + h.payload_size_or_root_block,
+                h.meta_size_or_prev_block + h.content_size_or_root_block,
             ),
             Meta => (0, h.meta_size_or_prev_block),
         }
@@ -264,8 +266,8 @@ impl LinearStorage {
     fn index_add(&mut self, blid: u32) -> Result<(), StorageError> {
         let (header, meta) = self.read_meta_from_block(blid)?;
         let info = PayloadInfo {
-            version: header.payload_version,
-            payload_size: header.payload_size_or_root_block,
+            version: header.content_version,
+            payload_size: header.content_size_or_root_block,
             first_block: blid,
             meta_size: header.meta_size_or_prev_block,
         };
@@ -315,5 +317,30 @@ impl FreeSpace {
             empty,
             empty_after: empty_after as u32,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test::TestVecBackend;
+
+    #[test]
+    fn read_block_headers() {
+        let mut backend = TestVecBackend::new_with_capacity(10);
+
+        let m = meta::tests::simple_meta_bytes("abc");
+        backend.write_single_block(3, &m, &[1u8]);
+
+        let storage = LinearStorage::load(Box::new(backend)).unwrap();
+
+        let h = storage.read_block_header(0).unwrap();
+        assert_eq!(h.typever, HeaderTypever::EMPTY);
+        assert!(!h.typever.is_valid());
+
+        let h = storage.read_block_header(3).unwrap();
+        assert_eq!(h.typever, HeaderTypever::HEAD_SINGLE);
+        assert!(h.typever.is_valid());
+        assert!(h.typever.is_head());
     }
 }

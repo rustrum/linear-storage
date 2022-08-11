@@ -180,8 +180,16 @@ pub(crate) fn deserialize_meta_entry(buf: &[u8]) -> Result<(MetaEntry, usize), S
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+
+    pub fn simple_meta_bytes(key: &str) -> Vec<u8> {
+        let m = Metadata {
+            key: key.to_string(),
+            meta: vec![],
+        };
+        serialize_meta(&m)
+    }
 
     #[test]
     fn meta_ser_deser() {

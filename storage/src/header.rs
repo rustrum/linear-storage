@@ -67,12 +67,12 @@ pub struct BlockHeader {
     /// After `u16::MAX` resets to zero.
     /// Could be used to implement some kind of optimistic locking.
     /// It is also barely possible that you will have something like `u16::MAX` concurrent events at the same time.
-    pub(crate) payload_version: u16,
+    pub(crate) content_version: u16,
 
     /// Size of the payload in bytes for `HEAD` block or number of the first block.
     /// Notice that we could potentially have multiple tails for the one root.
     /// Reference to root is just an additional information.
-    pub(crate) payload_size_or_root_block: u32,
+    pub(crate) content_size_or_root_block: u32,
 
     /// Next block if it is exists or zero.
     /// The only one true valid reference that you should rely while reading payload.
@@ -88,8 +88,8 @@ impl Default for BlockHeader {
     fn default() -> Self {
         BlockHeader {
             typever: HeaderTypever::HEAD,
-            payload_version: 0,
-            payload_size_or_root_block: 0,
+            content_version: 0,
+            content_size_or_root_block: 0,
             next_block: 0,
             meta_size_or_prev_block: 0,
         }
@@ -133,7 +133,7 @@ mod tests {
         let fh1 = BlockHeader::default();
         let fh2 = BlockHeader {
             typever: HeaderTypever::TAIL,
-            payload_size_or_root_block: 10,
+            content_size_or_root_block: 10,
             meta_size_or_prev_block: 10,
             ..BlockHeader::default()
         };
