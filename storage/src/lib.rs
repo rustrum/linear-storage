@@ -14,7 +14,7 @@ pub struct PayloadInfo {
     version: u16,
     first_block: u32,
     payload_size: u32,
-    has_meta: bool,
+    meta_size: u32,
 }
 
 pub struct LinearStorage {
@@ -24,101 +24,93 @@ pub struct LinearStorage {
 }
 
 impl LinearStorage {
-    pub fn load(backend: Box<dyn StorageBackend>) -> LinearStorage {
-        LinearStorage {
+    pub fn load(backend: Box<dyn StorageBackend>) -> Result<LinearStorage, StorageError> {
+        let mut store = LinearStorage {
             backend,
             index: HashMap::new(),
             free: FreeSpace::none(),
-        }
+        };
+        store.index_build()?;
+        Ok(store)
     }
 
-    pub fn read(&self) -> Option<Vec<u8>> {
+    pub fn read(&self, key: &str) -> Option<Vec<u8>> {
+        let value = self.index.get(key)?;
         unimplemented!()
+    }
+
+    /// Read all meta bytes or payload bytes
+    fn read_bytes_from_blocks(
+        &self,
+        block: u32,
+        what: ReadContent,
+    ) -> Result<(BlockHeader, Vec<u8>), StorageError> {
+        let mut now_block = block;
+        let (mut header, mut bytes) = self.read_block(now_block)?;
+        if !header.typever.is_head() {
+            return Err(StorageError::LowLevel(format!(
+                "First block {} in a sequence is not a head {:?}",
+                now_block, header.typever
+            )));
+        }
+        let init_header = header.clone();
+
+        let (offset, until) = LinearStorage::read_bytes_from_blocks_offsets(header, what);
+        // until offset is a literally a length of bytes from the 0 position in the first block
+        let total_blocks = self.blocks_for_bytes(until);
+
+        let mut blk: u32 = 0;
+        let mut res: Vec<u8> = vec![0; (until - offset) as usize];
+        let mut read_pos = 0u32;
+        let mut write_pos = 0usize;
+
+        // Loopee
+        'blocks: loop {
+            'bytes: for i in 0..bytes.len() {
+                if read_pos >= until {
+                    break 'blocks;
+                }
+                if read_pos < offset {
+                    continue 'bytes;
+                }
+                res.insert(write_pos, bytes[i]);
+                write_pos += 1;
+                read_pos += 1;
+            }
+
+            if header.typever.is_last() {
+                break;
+            }
+            let (header, bytes) = self.read_block(now_block)?;
+            if !header.typever.is_valid() || header.typever.is_head() {
+                // next must be valid and could not be head
+                return Err(StorageError::LowLevel(format!(
+                    "Invalid block {} while reading from {}",
+                    now_block, block
+                )));
+            }
+            blk += 1;
+            if blk >= total_blocks {
+                break;
+            }
+        }
+        Ok((init_header, res))
+    }
+
+    #[inline]
+    fn read_bytes_from_blocks_offsets(h: BlockHeader, c: ReadContent) -> (u32, u32) {
+        match c {
+            All => (0, h.meta_size_or_prev_block + h.payload_size_or_root_block),
+            Payload => (
+                h.meta_size_or_prev_block,
+                h.meta_size_or_prev_block + h.payload_size_or_root_block,
+            ),
+            Meta => (0, h.meta_size_or_prev_block),
+        }
     }
 
     pub fn write(&self) {
         unimplemented!()
-    }
-
-    fn index_build(&mut self) -> Result<(), StorageError> {
-        let blocks_total = self.backend.size_blocks();
-
-        let mut occupied = vec![false; blocks_total as usize];
-
-        for bid in 0..blocks_total {
-            if occupied[bid as usize] {
-                continue;
-            }
-
-            let header = self.read_block_header(bid)?;
-            let tv = header.header_typever.clone();
-            match tv {
-                HeaderTypever::HEAD => {
-                    self.index_head_block(bid, header, &mut occupied)?;
-                }
-                HeaderTypever::SINGLE => {
-                    occupied[bid as usize] = true;
-                }
-                _ => {
-                    continue;
-                }
-            }
-        }
-
-        self.free = FreeSpace::from_occupied(occupied);
-        Ok(())
-    }
-
-    fn index_head_block(
-        &mut self,
-        blid: u32,
-        header: BlockHeader,
-        occupied: &mut Vec<bool>,
-    ) -> Result<(), StorageError> {
-        if header.header_typever != HeaderTypever::HEAD {
-            return Err(StorageError::BadInput);
-        }
-
-        self.index_add(blid, &header)?;
-
-        let mut header = header;
-        let mut block = blid;
-        loop {
-            occupied[block as usize] = true;
-
-            if header.header_typever == HeaderTypever::TAIL {
-                break;
-            }
-
-            block = header.next_block;
-            header = self.read_block_header(block)?;
-            match &header.header_typever {
-                HeaderTypever::MID | HeaderTypever::TAIL => {
-                    // Nothing to to here
-                }
-                _ => {
-                    return Err(StorageError::LowLevel(format!(
-                        "Unexpected type {:?} for next block {}",
-                        header.header_typever, block
-                    )))
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn index_add(&mut self, blid: u32, header: &BlockHeader) -> Result<(), StorageError> {
-        let meta = self.read_meta_with_header(blid, header)?;
-        let info = PayloadInfo {
-            version: header.payload_version,
-            payload_size: header.payload_size_or_root_block,
-            first_block: blid,
-            has_meta: header.meta_size_or_prev_block > 0,
-        };
-
-        self.index.insert(meta.key, info);
-
-        Ok(())
     }
 
     /// Read `BlockHeader` from some block by it's number.
@@ -167,54 +159,16 @@ impl LinearStorage {
         Ok((header, Vec::from(payload_bytes)))
     }
 
+    /// Read meta data from one or multiple blocks.
+    /// Input should reference to HEAD block
     #[inline]
-    pub(crate) fn read_meta_from_block(&self, block: u32) -> Result<Metadata, StorageError> {
-        let header = self.read_block_header(block)?;
-        self.read_meta_with_header(block, &header)
-    }
-
-    pub(crate) fn read_meta_with_header(
+    pub(crate) fn read_meta_from_block(
         &self,
         block: u32,
-        header: &BlockHeader,
-    ) -> Result<Metadata, StorageError> {
-        if header.header_typever != HeaderTypever::HEAD {
-            return Err(StorageError::BadInput);
-        }
-
-        let mut bytes_to_read = header.meta_size_or_prev_block;
-        let mut meta_buf = vec![0u8; bytes_to_read as usize];
-        let mut blocks_left = self.blocks_for_bytes(bytes_to_read);
-        let mut now_block = block;
-        let mut offset = 0;
-
-        if blocks_left > 0 {
-            blocks_left -= 1;
-        }
-        loop {
-            let (header, bytes) = self.read_block(now_block)?;
-            for i in 0..bytes.len() {
-                if offset >= bytes_to_read {
-                    break;
-                }
-                meta_buf[offset as usize] = bytes[i];
-                offset += 1;
-            }
-
-            if header.header_typever == HeaderTypever::TAIL {
-                break;
-            }
-
-            now_block = header.next_block;
-
-            if blocks_left == 0 {
-                break;
-            }
-            blocks_left -= 1;
-        }
-
-        let meta = deserialize_meta(&meta_buf)?;
-        Ok(meta)
+    ) -> Result<(BlockHeader, Metadata), StorageError> {
+        let (h, bytes) = self.read_bytes_from_blocks(block, ReadContent::Meta)?;
+        let meta = deserialize_meta(&bytes)?;
+        Ok((h, meta))
     }
 
     #[inline]
@@ -233,6 +187,99 @@ impl LinearStorage {
         }
         blocks
     }
+
+    /// Number of content/payload bytes in the block
+    #[inline]
+    pub fn bytes_in_block(&self) -> u32 {
+        self.backend.block_size() - BLOCK_HEADER_SPACE_BYTES as u32
+    }
+
+    fn index_build(&mut self) -> Result<(), StorageError> {
+        let blocks_total = self.backend.size_blocks();
+
+        let mut occupied = vec![false; blocks_total as usize];
+
+        for bid in 0..blocks_total {
+            if occupied[bid as usize] {
+                continue;
+            }
+
+            let header = self.read_block_header(bid)?;
+            let tv = header.typever.clone();
+            match tv {
+                HeaderTypever::HEAD => {
+                    self.index_head_block(bid, header, &mut occupied)?;
+                }
+                HeaderTypever::HEAD_SINGLE => {
+                    occupied[bid as usize] = true;
+                }
+                _ => {
+                    continue;
+                }
+            }
+        }
+
+        self.free = FreeSpace::from_occupied(occupied);
+        Ok(())
+    }
+
+    fn index_head_block(
+        &mut self,
+        blid: u32,
+        header: BlockHeader,
+        occupied: &mut Vec<bool>,
+    ) -> Result<(), StorageError> {
+        if header.typever != HeaderTypever::HEAD {
+            return Err(StorageError::BadInput);
+        }
+
+        self.index_add(blid)?;
+
+        let mut header = header;
+        let mut block = blid;
+        loop {
+            occupied[block as usize] = true;
+
+            if header.typever.is_last() {
+                break;
+            }
+
+            block = header.next_block;
+            header = self.read_block_header(block)?;
+            match &header.typever {
+                HeaderTypever::MID | HeaderTypever::TAIL => {
+                    // Nothing to to here
+                }
+                _ => {
+                    return Err(StorageError::LowLevel(format!(
+                        "Unexpected type {:?} for next block {}",
+                        header.typever, block
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn index_add(&mut self, blid: u32) -> Result<(), StorageError> {
+        let (header, meta) = self.read_meta_from_block(blid)?;
+        let info = PayloadInfo {
+            version: header.payload_version,
+            payload_size: header.payload_size_or_root_block,
+            first_block: blid,
+            meta_size: header.meta_size_or_prev_block,
+        };
+
+        self.index.insert(meta.key, info);
+
+        Ok(())
+    }
+}
+
+enum ReadContent {
+    All,
+    Meta,
+    Payload,
 }
 
 struct FreeSpace {

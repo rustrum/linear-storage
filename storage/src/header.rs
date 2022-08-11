@@ -7,6 +7,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 
+use crate::HeaderTypever::{EMPTY, HEAD, HEAD_SINGLE, TAIL, UNDEFINED};
 use linear_storage_core::StorageError;
 
 /// Fixed space allocated for header in each block.
@@ -19,7 +20,7 @@ const HEADER_V1: u8 = 0x10;
 /// Combination of type and version of the header 4x4 bits.
 /// Having more than 16 variants of headers is too much as well as supporting 16 different binary versions.
 #[repr(u8)]
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Debug, Clone, Copy)]
 pub enum HeaderTypever {
     /// This is not a header.
     /// All data must be considered as invalid.
@@ -29,21 +30,38 @@ pub enum HeaderTypever {
     /// Also it could be some kind of improperly saved block, damaged, empty.
     UNDEFINED = HEADER_V1 | 0x00,
     /// Single block  that holds all payload.
-    SINGLE = HEADER_V1 | 0x01,
-    /// First block, could be the last one too.
+    HEAD_SINGLE = HEADER_V1 | 0x01,
+    /// First block in the sequence.
     HEAD = HEADER_V1 | 0x02,
-    /// One of the many possible middle blocks
+    /// One of the many middle blocks in the sequence.
     MID = HEADER_V1 | 0x03,
     /// Tail block, the last one.
     TAIL = HEADER_V1 | 0x04,
 }
 
+impl HeaderTypever {
+    /// Check whether this block is first in the sequence and it is valid.
+    pub fn is_head(&self) -> bool {
+        self == &HEAD_SINGLE || self == &HEAD
+    }
+
+    /// True if this is last or the only one block in the sequence.
+    pub fn is_last(&self) -> bool {
+        self == &HEAD_SINGLE || self == &TAIL
+    }
+
+    /// Check if current type block contains valid data
+    pub fn is_valid(&self) -> bool {
+        self != &EMPTY && self != &UNDEFINED
+    }
+}
+
 #[repr(C)]
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Clone, Copy, Debug)]
 pub struct BlockHeader {
     /// Combined header type and version field.
     /// For internal use only.
-    pub(crate) header_typever: HeaderTypever,
+    pub(crate) typever: HeaderTypever,
 
     /// Counter that is incremented each time payload updates.
     /// After `u16::MAX` resets to zero.
@@ -69,7 +87,7 @@ pub struct BlockHeader {
 impl Default for BlockHeader {
     fn default() -> Self {
         BlockHeader {
-            header_typever: HeaderTypever::HEAD,
+            typever: HeaderTypever::HEAD,
             payload_version: 0,
             payload_size_or_root_block: 0,
             next_block: 0,
@@ -114,7 +132,7 @@ mod tests {
     fn header_read_write() {
         let fh1 = BlockHeader::default();
         let fh2 = BlockHeader {
-            header_typever: HeaderTypever::TAIL,
+            typever: HeaderTypever::TAIL,
             payload_size_or_root_block: 10,
             meta_size_or_prev_block: 10,
             ..BlockHeader::default()

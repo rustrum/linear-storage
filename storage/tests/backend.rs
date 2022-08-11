@@ -57,7 +57,7 @@ impl StorageBackend for TestVecBackend {
     }
 
     fn size_blocks(&self) -> u32 {
-        (self.size_bytes() / self.block_size()) as u32
+        (self.size_bytes() / self.block_size() as usize) as u32
     }
 
     fn size_bytes(&self) -> usize {
