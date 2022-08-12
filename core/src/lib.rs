@@ -20,7 +20,7 @@ impl Display for StorageError {
             }
             Self::Other(err) => Display::fmt(&err, f),
             _ => {
-                write!(f, "{}", self)
+                write!(f, "{:?}", self)
             }
         }
     }

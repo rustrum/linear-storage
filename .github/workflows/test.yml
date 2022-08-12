@@ -1,0 +1,63 @@
+name: "Test this stuff"
+
+on:
+  push:
+    branches:
+      - 'main'
+
+jobs:
+  are-we-screwed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          submodules: recursive
+
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          components: rustfmt, clippy
+
+#      - name: Geting week number
+#        id: date
+#        run: echo "::set-output name=week::$(date +'%U')"
+#
+#      - name: Cargo deps cache
+#        if: ${{ ! inputs.disable-cache }}
+#        uses: actions/cache@v3
+#        with:
+#          # hashFiles function does not work because of error "The template is not valid." but template is valid
+#          # key: cargo-full-${{ github.ref_name }}-${{ hashFiles('**/Cargo.toml') }}
+#          # Cache cargo dependencies only once per week for all branches
+#          key: cargo-deps-${{ steps.date.outputs.week }}
+#          restore-keys: |
+#            cargo-deps-
+#
+#          path: |
+#            ~/.cargo/bin/
+#            ~/.cargo/registry/index/
+#            ~/.cargo/registry/cache/
+#            ~/.cargo/git/db/
+#            /usr/local/cargo/bin/
+#            /usr/local/cargo/registry/index/
+#            /usr/local/cargo/registry/cache/
+#            /usr/local/cargo/git/db/
+
+      - uses: actions-rs/cargo@v1
+        name: "fmt"
+        with:
+          command: fmt
+          args: --all --check
+
+      - uses: actions-rs/cargo@v1
+        name: "clippy"
+        with:
+          command: clippy
+          args: --all-features --all-targets
+
+      - uses: actions-rs/cargo@v1
+        name: "test"
+        with:
+          command: test
+          args: --all-features --all-targets
