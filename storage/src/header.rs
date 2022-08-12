@@ -56,6 +56,7 @@ impl HeaderTypever {
     }
 }
 
+/// TODO Should think about fields ordering
 #[repr(C)]
 #[derive(PartialEq, Clone, Copy, Debug)]
 pub struct BlockHeader {
@@ -67,9 +68,9 @@ pub struct BlockHeader {
     /// After `u16::MAX` resets to zero.
     /// Could be used to implement some kind of optimistic locking.
     /// It is also barely possible that you will have something like `u16::MAX` concurrent events at the same time.
-    pub(crate) content_version: u16,
+    pub(crate) payload_version: u16,
 
-    /// Size of the payload in bytes for `HEAD` block or number of the first block.
+    /// Size of the content in bytes for `HEAD` block or number of the first block.
     /// Notice that we could potentially have multiple tails for the one root.
     /// Reference to root is just an additional information.
     pub(crate) content_size_or_root_block: u32,
@@ -88,7 +89,7 @@ impl Default for BlockHeader {
     fn default() -> Self {
         BlockHeader {
             typever: HeaderTypever::HEAD,
-            content_version: 0,
+            payload_version: 0,
             content_size_or_root_block: 0,
             next_block: 0,
             meta_size_or_prev_block: 0,

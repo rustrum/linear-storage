@@ -20,9 +20,9 @@ pub struct PayloadInfo {
 }
 
 pub struct LinearStorage {
-    backend: Box<dyn StorageBackend>,
-    index: HashMap<String, PayloadInfo>,
-    free: FreeSpace,
+    pub(crate) backend: Box<dyn StorageBackend>,
+    pub(crate) index: HashMap<String, PayloadInfo>,
+    pub(crate) free: FreeSpace,
 }
 
 impl LinearStorage {
@@ -36,8 +36,20 @@ impl LinearStorage {
         Ok(store)
     }
 
-    pub fn read(&self, key: &str) -> Option<Vec<u8>> {
-        let value = self.index.get(key)?;
+    /// Read content by key
+    pub fn read_content_bytes(&self, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let value = match self.index.get(key) {
+            Some(v) => v,
+            None => {
+                return Ok(None);
+            }
+        };
+
+        let (_, bytes) = self.read_bytes_from_blocks(value.first_block, Payload::Content)?;
+        Ok(Some(bytes))
+    }
+
+    pub fn write(&self) {
         unimplemented!()
     }
 
@@ -45,7 +57,7 @@ impl LinearStorage {
     fn read_bytes_from_blocks(
         &self,
         block: u32,
-        what: ReadContent,
+        payload_part: Payload,
     ) -> Result<(BlockHeader, Vec<u8>), StorageError> {
         let mut now_block = block;
         let (mut header, mut bytes) = self.read_block(now_block)?;
@@ -57,7 +69,8 @@ impl LinearStorage {
         }
         let init_header = header.clone();
 
-        let (offset, until) = LinearStorage::read_bytes_from_blocks_offsets(header, what);
+        let (offset, until) = LinearStorage::read_bytes_from_blocks_offsets(header, payload_part);
+
         // until offset is a literally a length of bytes from the 0 position in the first block
         let total_blocks = self.blocks_for_bytes(until);
 
@@ -69,14 +82,17 @@ impl LinearStorage {
         // Loopee
         'blocks: loop {
             'bytes: for i in 0..bytes.len() {
+                // println!(
+                //     "read {} write {}, offset {} until {}",
+                //     read_pos, write_pos, offset, until
+                // );
                 if read_pos >= until {
                     break 'blocks;
                 }
-                if read_pos < offset {
-                    continue 'bytes;
+                if read_pos >= offset {
+                    res[write_pos] = bytes[i];
+                    write_pos += 1;
                 }
-                res.insert(write_pos, bytes[i]);
-                write_pos += 1;
                 read_pos += 1;
             }
 
@@ -100,19 +116,15 @@ impl LinearStorage {
     }
 
     #[inline]
-    fn read_bytes_from_blocks_offsets(h: BlockHeader, c: ReadContent) -> (u32, u32) {
+    fn read_bytes_from_blocks_offsets(h: BlockHeader, c: Payload) -> (u32, u32) {
         match c {
-            All => (0, h.meta_size_or_prev_block + h.content_size_or_root_block),
-            Payload => (
+            Payload::All => (0, h.meta_size_or_prev_block + h.content_size_or_root_block),
+            Payload::Content => (
                 h.meta_size_or_prev_block,
                 h.meta_size_or_prev_block + h.content_size_or_root_block,
             ),
-            Meta => (0, h.meta_size_or_prev_block),
+            Payload::Meta => (0, h.meta_size_or_prev_block),
         }
-    }
-
-    pub fn write(&self) {
-        unimplemented!()
     }
 
     /// Read `BlockHeader` from some block by it's number.
@@ -168,7 +180,8 @@ impl LinearStorage {
         &self,
         block: u32,
     ) -> Result<(BlockHeader, Metadata), StorageError> {
-        let (h, bytes) = self.read_bytes_from_blocks(block, ReadContent::Meta)?;
+        let (h, bytes) = self.read_bytes_from_blocks(block, Payload::Meta)?;
+        // println!("{:?}\nMeta bytes {:?}", h, bytes);
         let meta = deserialize_meta(&bytes)?;
         Ok((h, meta))
     }
@@ -207,31 +220,25 @@ impl LinearStorage {
             }
 
             let header = self.read_block_header(bid)?;
-            let tv = header.typever.clone();
-            match tv {
-                HeaderTypever::HEAD => {
-                    self.index_head_block(bid, header, &mut occupied)?;
-                }
-                HeaderTypever::HEAD_SINGLE => {
-                    occupied[bid as usize] = true;
-                }
-                _ => {
-                    continue;
-                }
+            if header.typever.is_head() {
+                self.index_from_head(bid, header, &mut occupied)?;
             }
         }
 
+        // 0 block should not be available
+        // Maybe in the future it will hold some meta info about all storage
+        occupied[0] = true;
         self.free = FreeSpace::from_occupied(occupied);
         Ok(())
     }
 
-    fn index_head_block(
+    fn index_from_head(
         &mut self,
         blid: u32,
         header: BlockHeader,
         occupied: &mut Vec<bool>,
     ) -> Result<(), StorageError> {
-        if header.typever != HeaderTypever::HEAD {
+        if !header.typever.is_head() {
             return Err(StorageError::BadInput);
         }
 
@@ -266,7 +273,7 @@ impl LinearStorage {
     fn index_add(&mut self, blid: u32) -> Result<(), StorageError> {
         let (header, meta) = self.read_meta_from_block(blid)?;
         let info = PayloadInfo {
-            version: header.content_version,
+            version: header.payload_version,
             payload_size: header.content_size_or_root_block,
             first_block: blid,
             meta_size: header.meta_size_or_prev_block,
@@ -278,15 +285,21 @@ impl LinearStorage {
     }
 }
 
-enum ReadContent {
+/// Determines parts of the payload to operate on.
+/// Payload is a literally any byte except header.
+#[derive(Debug)]
+enum Payload {
+    /// Meta + content
     All,
+    /// Only meta data
     Meta,
-    Payload,
+    /// Only content bytes
+    Content,
 }
 
 struct FreeSpace {
-    empty: BTreeSet<u32>,
-    empty_after: u32,
+    pub(crate) empty: BTreeSet<u32>,
+    pub(crate) empty_after: u32,
 }
 
 impl FreeSpace {
@@ -323,12 +336,11 @@ impl FreeSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::TestVecBackend;
+    use crate::test::{TestVecBackend, TEST_BLOCK_PAYLOAD_SIZE, TEST_BLOCK_SIZE};
 
     #[test]
     fn read_block_headers() {
         let mut backend = TestVecBackend::new_with_capacity(10);
-
         let m = meta::tests::simple_meta_bytes("abc");
         backend.write_single_block(3, &m, &[1u8]);
 
@@ -342,5 +354,58 @@ mod tests {
         assert_eq!(h.typever, HeaderTypever::HEAD_SINGLE);
         assert!(h.typever.is_valid());
         assert!(h.typever.is_head());
+    }
+
+    #[test]
+    fn single_block_indexing() {
+        let mut backend = TestVecBackend::new_with_capacity(10);
+        backend.write_single_block(1, &meta::tests::simple_meta_bytes("abc"), &[1u8]);
+        backend.write_single_block(3, &meta::tests::simple_meta_bytes("bcd"), &[2u8]);
+        backend.write_single_block(5, &meta::tests::simple_meta_bytes("cde"), &[3u8]);
+
+        let storage = LinearStorage::load(Box::new(backend)).unwrap();
+
+        assert_eq!(storage.index.len(), 3);
+        assert!(storage.index.contains_key("abc"));
+        assert!(storage.index.contains_key("bcd"));
+        assert!(storage.index.contains_key("cde"));
+
+        assert_eq!(storage.free.empty_after, 5);
+        assert_eq!(storage.free.empty.contains(&0), false);
+        assert_eq!(storage.free.empty.len(), 2);
+        assert!(storage.free.empty.contains(&2));
+        assert!(storage.free.empty.contains(&4));
+    }
+
+    #[test]
+    fn single_block_reading() {
+        let mut backend = TestVecBackend::new_with_capacity(10);
+
+        let k1 = meta::tests::simple_meta_bytes("abc");
+        let c1 = vec![1u8; 1];
+
+        let k2 = meta::tests::simple_meta_bytes("bcd");
+        let c2 = vec![1u8; TEST_BLOCK_PAYLOAD_SIZE as usize - k2.len() - 1];
+
+        let k3 = meta::tests::simple_meta_bytes("cde");
+        let c3 = vec![1u8; TEST_BLOCK_PAYLOAD_SIZE as usize - k3.len()];
+
+        backend.write_single_block(1, &k1, &c1);
+        backend.write_single_block(3, &k2, &c2);
+        backend.write_single_block(5, &k3, &c3);
+
+        let storage = LinearStorage::load(Box::new(backend)).unwrap();
+
+        let none = storage.read_content_bytes("non-existing-key").unwrap();
+        assert!(none.is_none());
+
+        let b1 = storage.read_content_bytes("abc").unwrap().unwrap();
+        assert_eq!(c1, b1, "Key is {:?}", k1);
+
+        let b2 = storage.read_content_bytes("bcd").unwrap().unwrap();
+        assert_eq!(c2, b2, "Key is {:?}", k2);
+
+        let b3 = storage.read_content_bytes("cde").unwrap().unwrap();
+        assert_eq!(c3, b3, "Key is {:?}", k3);
     }
 }

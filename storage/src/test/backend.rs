@@ -1,7 +1,8 @@
 use crate::header::{header_to_bytes, BlockHeader, HeaderTypever, BLOCK_HEADER_SPACE_BYTES};
 use linear_storage_core::{StorageBackend, StorageError};
 
-pub const TEST_BLOCK_SIZE: u32 = (BLOCK_HEADER_SPACE_BYTES + 20) as u32;
+pub const TEST_BLOCK_PAYLOAD_SIZE: u32 = 20 as u32;
+pub const TEST_BLOCK_SIZE: u32 = BLOCK_HEADER_SPACE_BYTES as u32 + TEST_BLOCK_PAYLOAD_SIZE;
 
 pub struct TestVecBackend {
     pub vec: Vec<u8>,
@@ -27,7 +28,7 @@ impl TestVecBackend {
         let h = BlockHeader {
             typever: HeaderTypever::HEAD_SINGLE,
             next_block: 0,
-            content_version: 0,
+            payload_version: 0,
             meta_size_or_prev_block: meta.len() as u32,
             content_size_or_root_block: content.len() as u32,
         };
@@ -74,7 +75,7 @@ impl StorageBackend for TestVecBackend {
             buf.len()
         };
 
-        println!("OFF {} LIMIT {}", off, (off + to_read));
+        //println!("OFF {} LIMIT {}", off, (off + to_read));
         let mut read: usize = 0;
         for i in off..(off + to_read) {
             buf[i - off] = self.vec[i];
