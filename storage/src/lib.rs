@@ -59,14 +59,16 @@ impl LinearStorage {
         block: u32,
         payload_part: Payload,
     ) -> Result<(BlockHeader, Vec<u8>), StorageError> {
-        let mut now_block = block;
-        let (mut header, mut bytes) = self.read_block(now_block)?;
+        let mut next_block = block;
+        let (mut header, mut bytes) = self.read_block(next_block)?;
         if !header.typever.is_head() {
             return Err(StorageError::LowLevel(format!(
                 "First block {} in a sequence is not a head {:?}",
-                now_block, header.typever
+                next_block, header.typever
             )));
         }
+        next_block = header.next_block;
+
         let init_header = header.clone();
 
         let (offset, until) = LinearStorage::read_bytes_from_blocks_offsets(header, payload_part);
@@ -82,6 +84,7 @@ impl LinearStorage {
         // Loopee
         'blocks: loop {
             'bytes: for i in 0..bytes.len() {
+                println!("{:?}", header);
                 // println!(
                 //     "read {} write {}, offset {} until {}",
                 //     read_pos, write_pos, offset, until
@@ -99,14 +102,17 @@ impl LinearStorage {
             if header.typever.is_last() {
                 break;
             }
-            let (header, bytes) = self.read_block(now_block)?;
+            let (h, b) = self.read_block(next_block)?;
+            header = h;
+            bytes = b;
             if !header.typever.is_valid() || header.typever.is_head() {
                 // next must be valid and could not be head
                 return Err(StorageError::LowLevel(format!(
                     "Invalid block {} while reading from {}",
-                    now_block, block
+                    next_block, block
                 )));
             }
+            next_block = header.next_block;
             blk += 1;
             if blk >= total_blocks {
                 break;
@@ -336,11 +342,11 @@ impl FreeSpace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test::{TestVecBackend, TEST_BLOCK_PAYLOAD_SIZE, TEST_BLOCK_SIZE};
+    use crate::test::{VecBackend, TEST_BLOCK_PAYLOAD_SIZE, TEST_BLOCK_SIZE};
 
     #[test]
     fn read_block_headers() {
-        let mut backend = TestVecBackend::new_with_capacity(10);
+        let mut backend = VecBackend::new_with_capacity(10);
         let m = meta::tests::simple_meta_bytes("abc");
         backend.write_single_block(3, &m, &[1u8]);
 
@@ -358,7 +364,7 @@ mod tests {
 
     #[test]
     fn single_block_indexing() {
-        let mut backend = TestVecBackend::new_with_capacity(10);
+        let mut backend = VecBackend::new_with_capacity(10);
         backend.write_single_block(1, &meta::tests::simple_meta_bytes("abc"), &[1u8]);
         backend.write_single_block(3, &meta::tests::simple_meta_bytes("bcd"), &[2u8]);
         backend.write_single_block(5, &meta::tests::simple_meta_bytes("cde"), &[3u8]);
@@ -370,25 +376,25 @@ mod tests {
         assert!(storage.index.contains_key("bcd"));
         assert!(storage.index.contains_key("cde"));
 
+        assert_eq!(storage.free.empty.len(), 2);
         assert_eq!(storage.free.empty_after, 5);
         assert_eq!(storage.free.empty.contains(&0), false);
-        assert_eq!(storage.free.empty.len(), 2);
         assert!(storage.free.empty.contains(&2));
         assert!(storage.free.empty.contains(&4));
     }
 
     #[test]
     fn single_block_reading() {
-        let mut backend = TestVecBackend::new_with_capacity(10);
+        let mut backend = VecBackend::new_with_capacity(10);
 
         let k1 = meta::tests::simple_meta_bytes("abc");
         let c1 = vec![1u8; 1];
 
         let k2 = meta::tests::simple_meta_bytes("bcd");
-        let c2 = vec![1u8; TEST_BLOCK_PAYLOAD_SIZE as usize - k2.len() - 1];
+        let c2 = vec![2u8; TEST_BLOCK_PAYLOAD_SIZE as usize - k2.len() - 1];
 
         let k3 = meta::tests::simple_meta_bytes("cde");
-        let c3 = vec![1u8; TEST_BLOCK_PAYLOAD_SIZE as usize - k3.len()];
+        let c3 = vec![3u8; TEST_BLOCK_PAYLOAD_SIZE as usize - k3.len()];
 
         backend.write_single_block(1, &k1, &c1);
         backend.write_single_block(3, &k2, &c2);
@@ -407,5 +413,52 @@ mod tests {
 
         let b3 = storage.read_content_bytes("cde").unwrap().unwrap();
         assert_eq!(c3, b3, "Key is {:?}", k3);
+    }
+
+    #[test]
+    fn multi_block_reading() {
+        let mut backend = VecBackend::new_with_capacity(16);
+
+        let k1 = meta::tests::simple_meta_bytes("abc");
+        let c1 = vec![1u8; TEST_BLOCK_PAYLOAD_SIZE as usize + 1 - k1.len()];
+
+        let k2 = meta::tests::simple_meta_bytes("bcd");
+        let c2 = vec![2u8; TEST_BLOCK_PAYLOAD_SIZE as usize * 2 - k2.len()];
+
+        let k3 = meta::tests::simple_meta_bytes("cde");
+        let c3 = vec![3u8; TEST_BLOCK_PAYLOAD_SIZE as usize * 3 - k3.len() - 1];
+
+        let k4 = meta::tests::simple_meta_bytes("def");
+        let k44 = meta::tests::simple_meta_bytes("defg");
+        let c4 = vec![4u8; TEST_BLOCK_PAYLOAD_SIZE as usize * 3 - k4.len()];
+
+        backend.write_block_chain(&[1, 2], &k1, &c1);
+        backend.write_block_chain(&[3, 5], &k2, &c2);
+        backend.write_block_chain(&[4, 6, 10], &k3, &c3);
+        backend.write_block_chain(&[7, 8, 11], &k4, &c4);
+        backend.write_block_chain(&[9, 14, 12, 13], &k44, &c4);
+
+        let storage = LinearStorage::load(Box::new(backend)).unwrap();
+
+        assert_eq!(storage.index.len(), 5);
+
+        let none = storage.read_content_bytes("non-existing-key").unwrap();
+        assert!(none.is_none());
+
+        let b1 = storage.read_content_bytes("abc").unwrap().unwrap();
+        assert_eq!(c1, b1, "Key is {:?}", k1);
+
+        let b2 = storage.read_content_bytes("bcd").unwrap().unwrap();
+        assert_eq!(c2, b2, "Key is {:?}", k2);
+
+        let b3 = storage.read_content_bytes("cde").unwrap().unwrap();
+        assert_eq!(c3, b3, "Key is {:?}", k3);
+
+        let b4 = storage.read_content_bytes("def").unwrap().unwrap();
+        assert_eq!(c4, b4, "Key is {:?}", k4);
+
+        let b44 = storage.read_content_bytes("defg").unwrap().unwrap();
+        assert_eq!(c4, b44, "Key is {:?}", k44);
+        assert_eq!(b4, b44);
     }
 }
